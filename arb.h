@@ -882,6 +882,15 @@ _arb_vec_scalar_addmul(arb_ptr res, arb_srcptr vec,
 }
 
 ARB_INLINE void
+_arb_vec_pow_ui(arb_ptr res, arb_srcptr vec,
+        slong len, ulong p, slong prec)
+{
+    slong i;
+    for (i = 0; i < len; i++)
+        arb_pow_ui(res + i, vec + i, p, prec);
+}
+
+ARB_INLINE void
 _arb_vec_dot(arb_t res, arb_srcptr vec1, arb_srcptr vec2, slong len2, slong prec)
 {
     slong i;
