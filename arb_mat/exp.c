@@ -29,6 +29,401 @@
 
 #define LOG2_OVER_E 0.25499459743395350926
 
+void
+_fmpz_max(fmpz_t z, fmpz_t x, fmpz_t y)
+{
+    if (fmpz_cmp(x, y) < 0)
+    {
+        fmpz_set(z, y);
+    }
+    else
+    {
+        fmpz_set(z, x);
+    }
+}
+
+
+/* fixed-capacity stack of fixed-precision signed flint integers */
+typedef struct
+{
+    slong *data;
+    slong capacity;
+    slong size;
+} si_stack_struct;
+typedef si_stack_struct si_stack_t[1];
+
+static void
+si_stack_init(si_stack_t S, slong capacity)
+{
+    S->data = flint_malloc(capacity);
+    S->capacity = capacity;
+    S->size = 0;
+}
+
+static void
+si_stack_clear(si_stack_t S)
+{
+    flint_free(S->data);
+}
+
+static void
+si_stack_push(si_stack_t S, slong x)
+{
+    if (S->size >= S->capacity) abort(); /* assert */
+    S->data[S->size++] = x;
+}
+
+static slong
+si_stack_pop(si_stack_t S)
+{
+    if (S->size <= 0) abort(); /* assert */
+    slong x;
+    x = S->data[S->size - 1];
+    S->size--;
+    return x;
+}
+
+
+/* struct for Tarjan's strongly connected components algorithm */
+typedef struct
+{
+    slong *_index;
+    slong *_lowlink;
+    int *_onstack;
+    si_stack_struct_t _S;
+    slong _nsccs;
+    slong _dim;
+    slong _idx;
+} tarjan_struct;
+typedef tarjan_struct tarjan_t[1];
+
+static const tarjan_UNDEFINED = -1;
+
+static slong *
+tarjan_index(tarjan_t t, slong i)
+{
+    return t->_index + i;
+}
+
+static slong *
+tarjan_lowlink(tarjan_t t, slong i)
+{
+    return t->_lowlink + i;
+}
+
+static int
+tarjan_onstack(tarjan_t t, slong i)
+{
+    return t->_onstack + i;
+}
+
+static void
+tarjan_push(tarjan_t t, slong v)
+{
+    si_stack_push(t->_S, v);
+    t->_onstack[v] = 1;
+}
+
+static slong
+tarjan_pop(tarjan_t t)
+{
+    slong v;
+    v = si_stack_pop(t->_S);
+    t->_onstack[v] = 0;
+    return v;
+}
+
+static slong
+tarjan_next_scc(tarjan_t t)
+{
+    return t->_nsccs++;
+}
+
+static slong
+tarjan_next_idx(tarjan_t t)
+{
+    return t->_idx++;
+}
+
+static void
+tarjan_init(tarjan_t t, slong dim)
+{
+    slong i;
+    t->_index = flint_calloc(dim, sizeof(slong));
+    t->_lowlink = flint_calloc(dim, sizeof(slong));
+    t->_onstack = flint_calloc(dim, sizeof(int));
+    si_stack_init(t->_S, dim);
+    t->_dim = dim;
+    t->_nsccs = 0;
+    t->_idx = 0;
+    for (i = 0; i < dim; i++)
+    {
+        t->_index[i] = tarjan_UNDEFINED;
+    }
+}
+
+static void
+tarjan_clear(tarjan_t t)
+{
+    flint_free(t->_index);
+    flint_free(t->_lowlink);
+    flint_free(t->_onstack);
+    si_stack_clear(t->_S);
+}
+
+static void
+tarjan_strongconnect(slong *sccs, tarjan_t t, fmpz_mat_t A, slong v)
+{
+    slong idx, w, scc;
+
+    idx = tarjan_next_idx(t);
+    *tarjan_index(t, v) = idx;
+    *tarjan_lowlink(t, v) = idx;
+    tarjan_push(t, v);
+    for (w = 0; w < t->_dim; w++)
+    {
+        if (!fmpz_is_zero(fmpz_mat_entry(A, v, w)))
+        {
+            if (*tarjan_index(t, w) == tarjan_UNDEFINED)
+            {
+                tarjan_strongconnect(A, t, w);
+                *tarjan_lowlink(t, v) = FLINT_MIN(
+                        *tarjan_lowlink(t, v), *tarjan_lowlink(t, w));
+            }
+            else if (tarjan_onstack(t, w))
+            {
+                *tarjan_lowlink(t, v) = FLINT_MIN(
+                        *tarjan_lowlink(t, v), *tarjan_index(t, w));
+            }
+        }
+    }
+    if (*tarjan_lowlink(t, v) == *tarjan_index(t, v))
+    {
+        scc = tarjan_next_scc(t);
+        while (w != v)
+        {
+            w = tarjan_pop(t);
+            if (sccs[w] != tarjan_UNDEFINED) abort(); /* assert */
+            sccs[w] = scc;
+        }
+    }
+}
+
+
+/* Tarjan's strongly connected components algorithm */
+void
+_fmpz_mat_get_sccs(slong *sccs, fmpz_mat_t A)
+{
+    slong v, dim;
+    tarjan_t t;
+
+    dim = fmpz_mat_nrows(A);
+
+    if (dim != fmpz_mat_ncols(A))
+    {
+        flint_printf("_fmpz_mat_get_sccs: a square matrix is required!\n");
+        abort();
+    }
+
+    tarjan_init(t, dim);
+
+    for (v = 0; v < dim; v++)
+    {
+        sccs[i] = tarjan_UNDEFINED;
+    }
+    for (v = 0; v < dim; v++)
+    {
+        if (*tarjan_index(t, v) == tarjan_UNDEFINED)
+        {
+            tarjan_strongconnect(sccs, t, A, v);
+        }
+    }
+
+    tarjan_clear(t);
+}
+
+
+typedef struct
+{
+    slong dim;
+    slong nsccs;
+    slong *vertex_to_scc;
+    fmpz_mat_t P;
+    fmpz_mat_t Q;
+} connectivity_struct;
+typedef connectivity_struct connectivity_t[1];
+
+void
+connectivity_init(connectivity_t x, fmpz_mat_t A)
+{
+    slong i, j, n;
+    slong u, v, w, scc;
+    fmpz_mat_t C;
+    slong *scc_size;
+    int *scc_has_loop;
+
+    n = fmpz_mat_nrows(A);
+    if (n != fmpz_mat_ncols(A))
+    {
+        flint_printf("connectivity_init: a square matrix is required!\n");
+        abort();
+    }
+    x->dim = n;
+
+    /* the sccs computed by tarjan's algorithm are provided in postorder */
+    x->vertex_to_scc = flint_malloc(n * sizeof(slong));
+    _fmpz_mat_get_sccs(x->vertex_to_scc, A);
+
+    x->nsccs = 0;
+    for (v = 0; v < n; v++)
+    {
+        scc = x->vertex_to_scc[v];
+        if (scc == tarjan_UNDEFINED) abort(); /* assert */
+        x->nsccs = FLINT_MAX(x->nsccs, scc+1);
+    }
+
+    fmpz_mat_init(C, x->nsccs, x->nsccs);
+    fmpz_mat_init(x->P, x->nsccs, x->nsccs);
+    fmpz_mat_init(x->Q, x->nsccs, x->nsccs);
+    for (u = 0; u < x->nsccs; u++)
+    {
+        for (v = 0; v < x->nsccs; v++)
+        {
+            fmpz_set_si(fmpz_mat_entry(x->P, u, v), -1);
+            fmpz_set_si(fmpz_mat_entry(x->Q, u, v), -1);
+        }
+    }
+
+    /* get properties of the strongly connected components */
+    scc_size = flint_calloc(x->nsccs, sizeof(slong));
+    scc_has_loop = flint_calloc(x->nsccs, sizeof(int));
+    for (i = 0; i < n; i++)
+    {
+        u = x->vertex_to_scc[i];
+        scc_size[u]++;
+        if (!fmpz_is_zero(fmpz_mat_entry(A, i, i)))
+        {
+            scc_has_loop[u] = 1;
+        }
+    }
+
+    /* compute the adjacency matrix of the condensation graph */
+    fmpz_mat_zero(C);
+    for (i = 0; i < n; i++)
+    {
+        for (j = 0; j < n; j++)
+        {
+            if (!fmpz_is_zero(fmpz_mat_entry(A, i, j)))
+            {
+                u = x->vertex_to_scc[i];
+                v = x->vertex_to_scc[j];
+                fmpz_one(fmpz_mat_entry(C, u, v));
+            }
+        }
+    }
+
+    /*
+     * Qualitatively characterize connectivity between components:
+     *  1 : in the condensation, there is a path from u to v
+     *      that includes cycle-containing sccs.
+     *  0 : in the condensation, there is a path from u to v
+     *      but no path that includes cycle-containing sccs.
+     * -1 : in the condensation, there is no path from u to v
+     */
+    for (u = 0; u < x->nsccs; u++)
+    {
+        fmpz_set_si(fmpz_mat_entry(x->P, u, u),
+                    scc_has_loop[u] || (scc_size[u] > 1));
+    }
+    for (u = 0; u < x->nsccs; u++)
+    {
+        for (v = 0; v < x->nsccs; v++)
+        {
+            if (!fmpz_is_zero(fmpz_mat_entry(C, u, v)))
+            {
+                _fmpz_max(fmpz_mat_entry(x->P, u, v),
+                          fmpz_mat_entry(x->P, u, u),
+                          fmpz_mat_entry(x->P, v, v));
+            }
+        }
+    }
+    for (u = 0; u < x->nsccs; u++)
+    {
+        for (v = 0; v < x->nsccs; v++)
+        {
+            for (w = 0; w < x->nsccs; w++)
+            {
+                _fmpz_max(fmpz_mat_entry(x->P, u, w),
+                          fmpz_mat_entry(x->P, u, v),
+                          fmpz_mat_entry(x->P, v, w));
+            }
+        }
+    }
+
+    /*
+     * Quantitatively characterize connectivity between components
+     * by computing the max path length in the condensation,
+     * or -1 if no path exists.
+     */
+    for (u = 0; u < x->nsccs; u++)
+    {
+        for (v = 0; v < x->nsccs; v++)
+        {
+            if (!fmpz_is_zero(fmpz_mat_entry(C, u, v)))
+            {
+                slong w;
+                for (w = 0; w < x->nsccs; w++)
+                {
+                    fmpz_struct *p = fmpz_mat_entry(x->Q, v, w);
+                    fmpz_set_si(fmpz_mat_entry(x->Q, 
+                            , FLINT_MAX(fmpz_get_si(p), u_has_cycle));
+                }
+            }
+        }
+    }
+
+    fmpz_mat_clear(C);
+    flint_free(scc_size);
+    flint_free(scc_has_loop);
+}
+
+void
+connectivity_clear(connectivity_t x)
+{
+    flint_free(x->sccs);
+    fmpz_mat_clear(x->P);
+    fmpz_mat_clear(x->Q);
+}
+
+int
+connectivity_has_truncation_error(connectivity_t x, slong i, slong j, ulong N)
+{
+    /* mag_exp_tail is like sum_{k=N}^\infty x^k/k! */
+    int p;
+    slong u, v;
+    u = x->sccs[i];
+    v = x->sccs[j];
+    p = fmpz_sgn(fmpz_mat_entry(x->P, u, v));
+    if (p == -1)
+    {
+        return 0;
+    }
+    else if (p == 0)
+    {
+        return fmpz_cmp_ui(fmpz_mat_entry(x->Q, u, v), N) > 0;
+    }
+    else
+    {
+        return 1;
+    }
+}
+
+
+void
+connectivity_make_scc_dag(fmpz_mat_t M, slong *sccs, A)
+{
+}
+
 
 /* Warshall's algorithm */
 void
