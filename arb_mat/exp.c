@@ -29,19 +29,26 @@
 
 #define LOG2_OVER_E 0.25499459743395350926
 
-void
-_fmpz_max(fmpz_t z, fmpz_t x, fmpz_t y)
+int
+_fmpz_mat_is_strict_lower_triangular(const fmpz_mat_t A)
 {
-    if (fmpz_cmp(x, y) < 0)
+    /* if row is less than or equal to col then entry is zero */
+    slong i, j;
+    for (i = 0; i < fmpz_mat_nrows(A); i++)
     {
-        fmpz_set(z, y);
+        for (j = 0; j < fmpz_mat_ncols(A); j++)
+        {
+            if (i <= j)
+            {
+                if (!fmpz_is_zero(fmpz_mat_entry(A, i, j)))
+                {
+                    return 0;
+                }
+            }
+        }
     }
-    else
-    {
-        fmpz_set(z, x);
-    }
+    return 1;
 }
-
 
 /* fixed-capacity stack of fixed-precision signed flint integers */
 typedef struct
@@ -243,191 +250,275 @@ _fmpz_mat_get_sccs(slong *sccs, fmpz_mat_t A)
 }
 
 
+/*
+ * Condensation of a matrix.
+ * This is the directed acyclic graph of strongly connected components.
+ */
 typedef struct
 {
-    slong dim;
-    slong nsccs;
-    slong *vertex_to_scc;
-    fmpz_mat_t P;
-    fmpz_mat_t Q;
-} connectivity_struct;
-typedef connectivity_struct connectivity_t[1];
+    slong n; /* number of vertices in the original graph */
+    slong k; /* number of strongly connnected components (sccs) */
+    fmpz_mat_t C; /* adjacency matrix of the sccs in the condensation */
+    slong *partition; /* maps the vertex index to the scc index */
+} condensation_struct;
+
+typedef condensation_struct condensation_t[1];
 
 void
-connectivity_init(connectivity_t x, fmpz_mat_t A)
+condensation_init(condensation_t c, fmpz_mat_t A)
 {
-    slong i, j, n;
-    slong u, v, w, scc;
-    fmpz_mat_t C;
-    slong *scc_size;
-    int *scc_has_loop;
+    slong i, j, u, v;
 
-    n = fmpz_mat_nrows(A);
-    if (n != fmpz_mat_ncols(A))
+    c->n = fmpz_mat_nrows(A);
+    if (c->n != fmpz_mat_ncols(A))
     {
-        flint_printf("connectivity_init: a square matrix is required!\n");
+        flint_printf("condensation_init: a square matrix is required!\n");
         abort();
     }
-    x->dim = n;
 
-    /* the sccs computed by tarjan's algorithm are provided in postorder */
-    x->vertex_to_scc = flint_malloc(n * sizeof(slong));
-    _fmpz_mat_get_sccs(x->vertex_to_scc, A);
+    c->partition = flint_malloc(c->n * sizeof(slong));
 
-    x->nsccs = 0;
-    for (v = 0; v < n; v++)
+    _fmpz_mat_get_sccs(c->partition, A);
+
+    /* count the strongly connected components */
+    c->k = 0;
+    for (i = 0; i < c->n; i++)
     {
-        scc = x->vertex_to_scc[v];
-        if (scc == tarjan_UNDEFINED) abort(); /* assert */
-        x->nsccs = FLINT_MAX(x->nsccs, scc+1);
+        u = c->partition[i];
+        c->k = FLINT_MAX(c->k, u + 1);
     }
 
-    fmpz_mat_init(C, x->nsccs, x->nsccs);
-    fmpz_mat_init(x->P, x->nsccs, x->nsccs);
-    fmpz_mat_init(x->Q, x->nsccs, x->nsccs);
-    for (u = 0; u < x->nsccs; u++)
-    {
-        for (v = 0; v < x->nsccs; v++)
-        {
-            fmpz_set_si(fmpz_mat_entry(x->P, u, v), -1);
-            fmpz_set_si(fmpz_mat_entry(x->Q, u, v), -1);
-        }
-    }
-
-    /* get properties of the strongly connected components */
-    scc_size = flint_calloc(x->nsccs, sizeof(slong));
-    scc_has_loop = flint_calloc(x->nsccs, sizeof(int));
-    for (i = 0; i < n; i++)
-    {
-        u = x->vertex_to_scc[i];
-        scc_size[u]++;
-        if (!fmpz_is_zero(fmpz_mat_entry(A, i, i)))
-        {
-            scc_has_loop[u] = 1;
-        }
-    }
-
-    /* compute the adjacency matrix of the condensation graph */
-    fmpz_mat_zero(C);
+    /*
+     * Compute the adjacency matrix of the condensation.
+     * This should be strict lower triangular, so that visiting the
+     * vertices in increasing order corresponds to a postorder traversal.
+     */
+    fmpz_mat_init(c->C, c->k, c->k);
+    fmpz_mat_zero(c->C);
     for (i = 0; i < n; i++)
     {
         for (j = 0; j < n; j++)
         {
             if (!fmpz_is_zero(fmpz_mat_entry(A, i, j)))
             {
-                u = x->vertex_to_scc[i];
-                v = x->vertex_to_scc[j];
-                fmpz_one(fmpz_mat_entry(C, u, v));
+                u = c->partition[i];
+                v = c->partition[j];
+                fmpz_one(fmpz_mat_entry(c->C, u, v));
             }
         }
     }
 
+    if (!_fmpz_mat_is_strict_lower_triangular(c->C))
+    {
+        flint_printf("condensation_init: unexpected matrix structure\n");
+        abort();
+    }
+}
+
+void
+condensation_clear(condensation_t c)
+{
+    fmpz_mat_clear(c->C);
+    flint_free(c->partition);
+}
+
+
+
+
+
+typedef struct
+{
+    condensation_t con;
+    fmpz_mat_t T; /* transitive closure of condensation */
+    fmpz_mat_t P; /* is there a cycle in any component on a path from u to v */
+    fmpz_mat_t Q; /* longest path, if any, from u to v */
+    int *scc_has_cycle;
+} connectivity_struct;
+typedef connectivity_struct connectivity_t[1];
+
+void
+connectivity_clear(connectivity_t c)
+{
+    fmpz_mat_clear(c->T);
+    fmpz_mat_clear(c->P);
+    fmpz_mat_clear(c->Q);
+    flint_free(c->scc_has_cycle);
+    condensation_free(c->con);
+}
+
+void
+_connectivity_init_scc_has_cycle(connectivity_t c, fmpz_mat_t A)
+{
+    slong n, i, u;
+
+    n = fmpz_mat_nrows(A);
+    c->scc_has_cycle = flint_calloc(n, sizeof(int));
+
     /*
-     * Qualitatively characterize connectivity between components:
-     *  1 : in the condensation, there is a path from u to v
-     *      that includes cycle-containing sccs.
-     *  0 : in the condensation, there is a path from u to v
-     *      but no path that includes cycle-containing sccs.
-     * -1 : in the condensation, there is no path from u to v
+     * If a vertex of the original graph has a loop,
+     * then the strongly connected component to which it belongs has a cycle.
      */
-    for (u = 0; u < x->nsccs; u++)
+    for (i = 0; i < n; i++)
     {
-        fmpz_set_si(fmpz_mat_entry(x->P, u, u),
-                    scc_has_loop[u] || (scc_size[u] > 1));
-    }
-    for (u = 0; u < x->nsccs; u++)
-    {
-        for (v = 0; v < x->nsccs; v++)
+        if (!fmpz_is_zero(fmpz_mat_entry(A, i, i)))
         {
-            if (!fmpz_is_zero(fmpz_mat_entry(C, u, v)))
-            {
-                _fmpz_max(fmpz_mat_entry(x->P, u, v),
-                          fmpz_mat_entry(x->P, u, u),
-                          fmpz_mat_entry(x->P, v, v));
-            }
-        }
-    }
-    for (u = 0; u < x->nsccs; u++)
-    {
-        for (v = 0; v < x->nsccs; v++)
-        {
-            for (w = 0; w < x->nsccs; w++)
-            {
-                _fmpz_max(fmpz_mat_entry(x->P, u, w),
-                          fmpz_mat_entry(x->P, u, v),
-                          fmpz_mat_entry(x->P, v, w));
-            }
+            u = c->con->partition[i];
+            c->scc_has_cycle[u] = 1;
         }
     }
 
     /*
-     * Quantitatively characterize connectivity between components
-     * by computing the max path length in the condensation,
-     * or -1 if no path exists.
+     * If a strongly connected component contains more than one vertex,
+     * then that component has a cycle.
      */
-    for (u = 0; u < x->nsccs; u++)
+    slong *scc_size;
+    scc_size = flint_calloc(c->con->k, sizeof(slong));
+    for (i = 0; i < n; i++)
     {
-        for (v = 0; v < x->nsccs; v++)
+        u = c->con->partition[i];
+        scc_size[u]++;
+    }
+    for (u = 0; u < c->con->k; u++)
+    {
+        if (scc_size[u] > 1)
         {
-            if (!fmpz_is_zero(fmpz_mat_entry(C, u, v)))
+            c->scc_has_cycle[u] = 1;
+        }
+    }
+
+    flint_free(scc_size);
+}
+
+void
+connectivity_init_arb_mat(connectivity_t c, fmpz_mat_t A)
+{
+    slong i, j, dim;
+    fmpz_mat_t B;
+
+    dim = arb_mat_nrows(A);
+    fmpz_mat_init(B, dim, dim);
+    fmpz_mat_zero(B);
+
+    for (i = 0; i < dim; i++)
+    {
+        for (j = 0; j < dim; j++)
+        {
+            if (!arb_is_zero(arb_mat_entry(A, i, j)))
             {
-                slong w;
-                for (w = 0; w < x->nsccs; w++)
+                fmpz_one(fmpz_mat_entry(B, i, j));
+            }
+        }
+    }
+
+    connectivity_init(c, B);
+
+    fmpz_mat_clear(B);
+}
+
+void
+connectivity_init(connectivity_t c, fmpz_mat_t A)
+{
+    slong i, j;
+    slong u, v, w;
+    slong n, k;
+
+    /* compute the condensation */
+    condensation_init(c->con, A);
+    n = c->con->n;
+    k = c->con->k;
+
+    /* check whether each scc contains a cycle */
+    _connectivity_init_scc_has_cycle(c, A);
+
+    /* compute the transitive closure of the condensation */
+    fmpz_mat_init(c->T, k, k);
+    _fmpz_mat_transitive_closure(c->C, A);
+
+    /*
+     * Is there a walk from u to v that passes through a cycle-containing scc?
+     * Cycles in the components u and v themselves are not considered.
+     * Remember that the condensation is a directed acyclic graph.
+     */
+    fmpz_mat_init(c->P, k, k);
+    fmpz_mat_zero(c->P);
+    for (w = 0; w < k; w++)
+    {
+        if (c->scc_has_cycle[w])
+        {
+            for (u = 0; u < k; u++)
+            {
+                for (v = 0; v < k; v++)
                 {
-                    fmpz_struct *p = fmpz_mat_entry(x->Q, v, w);
-                    fmpz_set_si(fmpz_mat_entry(x->Q, 
-                            , FLINT_MAX(fmpz_get_si(p), u_has_cycle));
+                    if (!fmpz_is_zero(fmpz_mat_entry(c->T, u, v)))
+                    {
+                        fmpz_one(fmpz_mat_entry(c->P, u, v));
+                    }
                 }
             }
         }
     }
 
-    fmpz_mat_clear(C);
-    flint_free(scc_size);
-    flint_free(scc_has_loop);
+    /*
+     * What is the max length path from u to v in the condensation graph?
+     * If u==v or if v is unreachable from u then let this be zero.
+     * Remember that the condensation is a directed acyclic graph,
+     * and that the components are indexed in a post-order traversal.
+     */
+    fmpz_mat_init(c->Q, k, k);
+    fmpz_mat_zero(c->Q);
+    for (u = 0; u < k; u++)
+    {
+        for (v = 0; v < k; v++)
+        {
+            slong first;
+            first = fmpz_get_si(fmpz_mat_entry(c->con->C, u, v));
+            for (w = 0; w < k; w++)
+            {
+                slong curr, rest;
+                rest = fmpz_get_si(fmpz_mat_entry(c->Q, v, w));
+                curr = fmpz_get_si(fmpz_mat_entry(c->Q, u, w));
+                fmpz_set_si(
+                        fmpz_mat_entry(c->Q, v, w),
+                        FLINT_MAX(curr, first + rest));
+            }
+        }
+    }
 }
 
-void
-connectivity_clear(connectivity_t x)
-{
-    flint_free(x->sccs);
-    fmpz_mat_clear(x->P);
-    fmpz_mat_clear(x->Q);
-}
 
 int
-connectivity_has_truncation_error(connectivity_t x, slong i, slong j, ulong N)
+connectivity_has_truncation_error(connectivity_t c, slong i, slong j, ulong N)
 {
     /* mag_exp_tail is like sum_{k=N}^\infty x^k/k! */
-    int p;
     slong u, v;
-    u = x->sccs[i];
-    v = x->sccs[j];
-    p = fmpz_sgn(fmpz_mat_entry(x->P, u, v));
-    if (p == -1)
+    u = c->partition[i];
+    v = c->partition[j];
+
+    if (u == v)
+    {
+        return c->scc_has_cycle[u];
+    }
+    else if (fmpz_is_zero(fmpz_mat_entry(c->T, u, v)))
     {
         return 0;
     }
-    else if (p == 0)
-    {
-        return fmpz_cmp_ui(fmpz_mat_entry(x->Q, u, v), N) > 0;
-    }
-    else
+    else if (
+            c->scc_has_cycle[u] ||
+            c->scc_has_cycle[v] ||
+            !fmpz_is_zero(fmpz_mat_entry(c->P, u, v)))
     {
         return 1;
     }
-}
-
-
-void
-connectivity_make_scc_dag(fmpz_mat_t M, slong *sccs, A)
-{
+    else
+    {
+        return fmpz_cmp_ui(fmpz_mat_entry(x->Q, u, v), N) > 0;
+    }
 }
 
 
 /* Warshall's algorithm */
 void
-_fmpz_mat_transitive_closure(fmpz_mat_t A)
+_fmpz_mat_transitive_closure(fmpz_mat_t B, fmpz_mat_t A)
 {
     slong k, i, j, dim;
     dim = fmpz_mat_nrows(A);
@@ -438,17 +529,22 @@ _fmpz_mat_transitive_closure(fmpz_mat_t A)
         abort();
     }
 
+    if (B != A)
+    {
+        fmpz_mat_set(B, A);
+    }
+
     for (k = 0; k < dim; k++)
     {
         for (i = 0; i < dim; i++)
         {
             for (j = 0; j < dim; j++)
             {
-                if (fmpz_is_zero(fmpz_mat_entry(A, i, j)) &&
-                    !fmpz_is_zero(fmpz_mat_entry(A, i, k)) &&
-                    !fmpz_is_zero(fmpz_mat_entry(A, k, j)))
+                if (fmpz_is_zero(fmpz_mat_entry(B, i, j)) &&
+                    !fmpz_is_zero(fmpz_mat_entry(B, i, k)) &&
+                    !fmpz_is_zero(fmpz_mat_entry(B, k, j)))
                 {
-                    fmpz_one(fmpz_mat_entry(A, i, j));
+                    fmpz_one(fmpz_mat_entry(B, i, j));
                 }
             }
         }
@@ -494,7 +590,7 @@ _arb_mat_exp_get_structure(fmpz_mat_t C, const arb_mat_t A)
             }
         }
     }
-    _fmpz_mat_transitive_closure(C);
+    _fmpz_mat_transitive_closure(C, C);
 }
 
 void
@@ -688,14 +784,13 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
     }
     else
     {
-        fmpz_mat_t S;
-        int using_structure;
+        connectivity_t C;
+        int using_connectivity;
 
-        using_structure = _arb_mat_any_is_zero(A);
-        if (using_structure)
+        using_connectivity = _arb_mat_any_is_zero(A);
+        if (using_connectivity)
         {
-            fmpz_mat_init(S, dim, dim);
-            _arb_mat_exp_get_structure(S, A);
+            connectivity_init_arb_mat(C, A);
         }
 
         q = pow(wp, 0.25);  /* wanted magnitude */
@@ -715,14 +810,19 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
 
         _arb_mat_exp_taylor(B, T, N, wp);
 
-        for (i = 0; i < dim; i++)
-            for (j = 0; j < dim; j++)
-                arb_add_error_mag(arb_mat_entry(B, i, j), err);
-
-        if (using_structure)
+        if (using_connectivity)
         {
-            _arb_mat_exp_set_structure(B, S);
-            fmpz_mat_clear(S);
+            for (i = 0; i < dim; i++)
+                for (j = 0; j < dim; j++)
+                    if (connectivity_has_truncation_error(C, i, j, N))
+                        arb_add_error_mag(arb_mat_entry(B, i, j), err);
+            connectivity_clear(C);
+        }
+        else
+        {
+            for (i = 0; i < dim; i++)
+                for (j = 0; j < dim; j++)
+                    arb_add_error_mag(arb_mat_entry(B, i, j), err);
         }
 
         for (i = 0; i < r; i++)
