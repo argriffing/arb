@@ -468,6 +468,7 @@ connectivity_init(connectivity_t c, fmpz_mat_t A)
 {
     slong u, v, w;
     slong k;
+    slong curr, rest;
 
     /* compute the condensation */
     condensation_init(c->con, A);
@@ -519,11 +520,14 @@ connectivity_init(connectivity_t c, fmpz_mat_t A)
         {
             if (!fmpz_is_zero(fmpz_mat_entry(c->con->C, u, w)))
             {
+                curr = fmpz_get_si(fmpz_mat_entry(c->Q, u, w));
+                fmpz_set_si(
+                        fmpz_mat_entry(c->Q, u, w),
+                        FLINT_MAX(curr, 1));
                 for (v = 0; v < k; v++)
                 {
                     if (!fmpz_is_zero(fmpz_mat_entry(c->T, w, v)))
                     {
-                        slong curr, rest;
                         rest = fmpz_get_si(fmpz_mat_entry(c->Q, w, v));
                         curr = fmpz_get_si(fmpz_mat_entry(c->Q, u, v));
                         fmpz_set_si(
@@ -563,36 +567,60 @@ connectivity_init_arb_mat(connectivity_t c, const arb_mat_t A)
     fmpz_mat_clear(B);
 }
 
-
-int
-connectivity_has_truncation_error(connectivity_t c, slong i, slong j, ulong N)
+void
+connectivity_sufficient_N(arb_t N, connectivity_t c, slong i, slong j)
 {
-    /* mag_exp_tail is like sum_{k=N}^\infty x^k/k! */
     slong u, v;
     u = c->con->partition[i];
     v = c->con->partition[j];
-
     if (u == v)
     {
-        return c->scc_has_cycle[u];
+        if (c->scc_has_cycle[u])
+        {
+            arb_pos_inf(N);
+        }
+        else
+        {
+            arb_one(N);
+        }
     }
     else if (fmpz_is_zero(fmpz_mat_entry(c->T, u, v)))
     {
-        return 0;
+        arb_one(N);
     }
     else if (
             c->scc_has_cycle[u] ||
             c->scc_has_cycle[v] ||
             !fmpz_is_zero(fmpz_mat_entry(c->P, u, v)))
     {
-        return 1;
+        arb_pos_inf(N);
     }
     else
     {
-        return fmpz_cmp_ui(fmpz_mat_entry(c->Q, u, v), N) > 0;
+        fmpz_t n;
+        fmpz_init(n);
+        fmpz_add_ui(n, fmpz_mat_entry(c->Q, u, v), 1);
+        arb_set_fmpz(N, n);
+        fmpz_clear(n);
     }
 }
 
+
+void
+_arb_mat_exp_sufficient_N(arb_mat_t M, const arb_mat_t A)
+{
+    slong i, j;
+    connectivity_t c;
+    connectivity_init_arb_mat(c, A);
+    for (i = 0; i < c->con->n; i++)
+    {
+        for (j = 0; j < c->con->n; j++)
+        {
+            connectivity_sufficient_N(arb_mat_entry(M, i, j), c, i, j);
+        }
+    }
+    connectivity_clear(c);
+}
 
 
 int
@@ -829,25 +857,21 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
     else
     {
         fmpz_mat_t S;
-        int using_structure;
+        int using_structure = 0;
 
-        connectivity_t C;
-        int using_connectivity;
+        arb_mat_t C;
+        int using_connectivity = 0;
 
-        /* using_connectivity = _arb_mat_any_is_zero(A); */
-        using_connectivity = 0;
+        if (1)
+            using_connectivity = _arb_mat_any_is_zero(A);
         if (using_connectivity)
         {
-            connectivity_init_arb_mat(C, A);
-            flint_printf("using connectivity for expm:\n");
-            connectivity_fprint(stdout, C);
-        }
-        else
-        {
-            flint_printf("not using connectivity for expm\n");
+            arb_mat_init(C, dim, dim);
+            _arb_mat_exp_sufficient_N(C, A);
         }
 
-        using_structure = _arb_mat_any_is_zero(A);
+        if (0)
+            using_structure = _arb_mat_any_is_zero(A);
         if (using_structure)
         {
             fmpz_mat_init(S, dim, dim);
@@ -867,17 +891,39 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
         mag_mul_2exp_si(norm, norm, -r);
 
         N = _arb_mat_exp_choose_N(norm, wp);
+
+        if (using_connectivity)
+        {
+            arb_t n, nmax;
+            arb_init(n);
+            arb_init(nmax);
+            arb_set_si(n, N);
+            arb_zero(nmax);
+            for (i = 0; i < dim; i++)
+                for (j = 0; j < dim; j++)
+                    if (arb_gt(arb_mat_entry(C, i, j), nmax))
+                        arb_set(nmax, arb_mat_entry(C, i, j));
+            if (arb_lt(nmax, n))
+                N = arf_get_si(arb_midref(nmax), ARF_RND_UP);
+            arb_clear(n);
+            arb_clear(nmax);
+        }
+
         mag_exp_tail(err, norm, N);
 
         _arb_mat_exp_taylor(B, T, N, wp);
 
         if (using_connectivity)
         {
+            arb_t n;
+            arb_init(n);
+            arb_set_si(n, N);
             for (i = 0; i < dim; i++)
                 for (j = 0; j < dim; j++)
-                    if (connectivity_has_truncation_error(C, i, j, N))
+                    if (arb_lt(n, arb_mat_entry(C, i, j)))
                         arb_add_error_mag(arb_mat_entry(B, i, j), err);
-            connectivity_clear(C);
+            arb_clear(n);
+            arb_mat_clear(C);
         }
         else
         {
