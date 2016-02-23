@@ -29,10 +29,45 @@
 
 #define LOG2_OVER_E 0.25499459743395350926
 
+
+/* Warshall's algorithm */
+void
+_fmpz_mat_transitive_closure(fmpz_mat_t B, fmpz_mat_t A)
+{
+    slong k, i, j, dim;
+    dim = fmpz_mat_nrows(A);
+
+    if (dim != fmpz_mat_ncols(A))
+    {
+        flint_printf("_fmpz_mat_transitive_closure: a square matrix is required!\n");
+        abort();
+    }
+
+    if (B != A)
+    {
+        fmpz_mat_set(B, A);
+    }
+
+    for (k = 0; k < dim; k++)
+    {
+        for (i = 0; i < dim; i++)
+        {
+            for (j = 0; j < dim; j++)
+            {
+                if (fmpz_is_zero(fmpz_mat_entry(B, i, j)) &&
+                    !fmpz_is_zero(fmpz_mat_entry(B, i, k)) &&
+                    !fmpz_is_zero(fmpz_mat_entry(B, k, j)))
+                {
+                    fmpz_one(fmpz_mat_entry(B, i, j));
+                }
+            }
+        }
+    }
+}
+
 int
 _fmpz_mat_is_strict_lower_triangular(const fmpz_mat_t A)
 {
-    /* if row is less than or equal to col then entry is zero */
     slong i, j;
     for (i = 0; i < fmpz_mat_nrows(A); i++)
     {
@@ -62,7 +97,7 @@ typedef si_stack_struct si_stack_t[1];
 static void
 si_stack_init(si_stack_t S, slong capacity)
 {
-    S->data = flint_malloc(capacity);
+    S->data = flint_malloc(capacity * sizeof(slong));
     S->capacity = capacity;
     S->size = 0;
 }
@@ -83,8 +118,8 @@ si_stack_push(si_stack_t S, slong x)
 static slong
 si_stack_pop(si_stack_t S)
 {
-    if (S->size <= 0) abort(); /* assert */
     slong x;
+    if (S->size <= 0) abort(); /* assert */
     x = S->data[S->size - 1];
     S->size--;
     return x;
@@ -97,14 +132,14 @@ typedef struct
     slong *_index;
     slong *_lowlink;
     int *_onstack;
-    si_stack_struct_t _S;
+    si_stack_t _S;
     slong _nsccs;
     slong _dim;
     slong _idx;
 } tarjan_struct;
 typedef tarjan_struct tarjan_t[1];
 
-static const tarjan_UNDEFINED = -1;
+static const slong tarjan_UNDEFINED = -1;
 
 static slong *
 tarjan_index(tarjan_t t, slong i)
@@ -121,7 +156,7 @@ tarjan_lowlink(tarjan_t t, slong i)
 static int
 tarjan_onstack(tarjan_t t, slong i)
 {
-    return t->_onstack + i;
+    return t->_onstack[i];
 }
 
 static void
@@ -193,7 +228,7 @@ tarjan_strongconnect(slong *sccs, tarjan_t t, fmpz_mat_t A, slong v)
         {
             if (*tarjan_index(t, w) == tarjan_UNDEFINED)
             {
-                tarjan_strongconnect(A, t, w);
+                tarjan_strongconnect(sccs, t, A, w);
                 *tarjan_lowlink(t, v) = FLINT_MIN(
                         *tarjan_lowlink(t, v), *tarjan_lowlink(t, w));
             }
@@ -236,7 +271,7 @@ _fmpz_mat_get_sccs(slong *sccs, fmpz_mat_t A)
 
     for (v = 0; v < dim; v++)
     {
-        sccs[i] = tarjan_UNDEFINED;
+        sccs[v] = tarjan_UNDEFINED;
     }
     for (v = 0; v < dim; v++)
     {
@@ -263,6 +298,22 @@ typedef struct
 } condensation_struct;
 
 typedef condensation_struct condensation_t[1];
+
+void
+condensation_fprint(FILE * file, condensation_t c)
+{
+    slong i;
+    flint_fprintf(file, "number of vertices: %wd\n", c->n);
+    flint_fprintf(file, "number of SCCs: %wd\n", c->k);
+    flint_fprintf(file, "adjacency matrix of SCCs:\n");
+    fmpz_mat_fprint_pretty(file, c->C);
+    flint_fprintf(file, "\n");
+    flint_fprintf(file, "partition of vertices:\n");
+    for (i = 0; i < c->n; i++)
+    {
+        flint_fprintf(file, "%wd : %wd\n", i, c->partition[i]);
+    }
+}
 
 void
 condensation_init(condensation_t c, fmpz_mat_t A)
@@ -295,15 +346,18 @@ condensation_init(condensation_t c, fmpz_mat_t A)
      */
     fmpz_mat_init(c->C, c->k, c->k);
     fmpz_mat_zero(c->C);
-    for (i = 0; i < n; i++)
+    for (i = 0; i < c->n; i++)
     {
-        for (j = 0; j < n; j++)
+        for (j = 0; j < c->n; j++)
         {
             if (!fmpz_is_zero(fmpz_mat_entry(A, i, j)))
             {
                 u = c->partition[i];
                 v = c->partition[j];
-                fmpz_one(fmpz_mat_entry(c->C, u, v));
+                if (u != v)
+                {
+                    fmpz_one(fmpz_mat_entry(c->C, u, v));
+                }
             }
         }
     }
@@ -311,6 +365,7 @@ condensation_init(condensation_t c, fmpz_mat_t A)
     if (!_fmpz_mat_is_strict_lower_triangular(c->C))
     {
         flint_printf("condensation_init: unexpected matrix structure\n");
+        fmpz_mat_print_pretty(c->C);
         abort();
     }
 }
@@ -337,19 +392,40 @@ typedef struct
 typedef connectivity_struct connectivity_t[1];
 
 void
+connectivity_fprint(FILE * file, connectivity_t c)
+{
+    slong i;
+    flint_fprintf(file, "begin condensation ...\n");
+    condensation_fprint(file, c->con);
+    flint_fprintf(file, "... end condensation\n");
+    flint_fprintf(file, "transitive closure of condensation:\n");
+    fmpz_mat_fprint_pretty(file, c->T);
+    flint_fprintf(file, "a path goes through a cycle-containing SCC:\n");
+    fmpz_mat_fprint_pretty(file, c->P);
+    flint_fprintf(file, "max path length in condensation:\n");
+    fmpz_mat_fprint_pretty(file, c->Q);
+    flint_fprintf(file, "SCC has cycle:\n");
+    for (i = 0; i < c->con->k; i++)
+    {
+        flint_fprintf(file, "%wd : %d\n", i, c->scc_has_cycle[i]);
+    }
+}
+
+void
 connectivity_clear(connectivity_t c)
 {
     fmpz_mat_clear(c->T);
     fmpz_mat_clear(c->P);
     fmpz_mat_clear(c->Q);
     flint_free(c->scc_has_cycle);
-    condensation_free(c->con);
+    condensation_clear(c->con);
 }
 
 void
 _connectivity_init_scc_has_cycle(connectivity_t c, fmpz_mat_t A)
 {
     slong n, i, u;
+    slong *scc_size;
 
     n = fmpz_mat_nrows(A);
     c->scc_has_cycle = flint_calloc(n, sizeof(int));
@@ -371,7 +447,6 @@ _connectivity_init_scc_has_cycle(connectivity_t c, fmpz_mat_t A)
      * If a strongly connected component contains more than one vertex,
      * then that component has a cycle.
      */
-    slong *scc_size;
     scc_size = flint_calloc(c->con->k, sizeof(slong));
     for (i = 0; i < n; i++)
     {
@@ -385,12 +460,85 @@ _connectivity_init_scc_has_cycle(connectivity_t c, fmpz_mat_t A)
             c->scc_has_cycle[u] = 1;
         }
     }
-
     flint_free(scc_size);
 }
 
 void
-connectivity_init_arb_mat(connectivity_t c, fmpz_mat_t A)
+connectivity_init(connectivity_t c, fmpz_mat_t A)
+{
+    slong u, v, w;
+    slong k;
+
+    /* compute the condensation */
+    condensation_init(c->con, A);
+    k = c->con->k;
+
+    /* check whether each scc contains a cycle */
+    _connectivity_init_scc_has_cycle(c, A);
+
+    /* compute the transitive closure of the condensation */
+    fmpz_mat_init(c->T, k, k);
+    _fmpz_mat_transitive_closure(c->T, c->con->C);
+
+    /*
+     * Is there a walk from u to v that passes through a cycle-containing scc?
+     * Cycles in the components u and v themselves are not considered.
+     * Remember that the condensation is a directed acyclic graph.
+     */
+    fmpz_mat_init(c->P, k, k);
+    fmpz_mat_zero(c->P);
+    for (w = 0; w < k; w++)
+    {
+        if (c->scc_has_cycle[w])
+        {
+            for (u = 0; u < k; u++)
+            {
+                for (v = 0; v < k; v++)
+                {
+                    if (!fmpz_is_zero(fmpz_mat_entry(c->T, u, w)) &&
+                        !fmpz_is_zero(fmpz_mat_entry(c->T, w, v)))
+                    {
+                        fmpz_one(fmpz_mat_entry(c->P, u, v));
+                    }
+                }
+            }
+        }
+    }
+
+    /*
+     * What is the max length path from u to v in the condensation graph?
+     * If u==v or if v is unreachable from u then let this be zero.
+     * Remember that the condensation is a directed acyclic graph,
+     * and that the components are indexed in a post-order traversal.
+     */
+    fmpz_mat_init(c->Q, k, k);
+    fmpz_mat_zero(c->Q);
+    for (u = 0; u < k; u++)
+    {
+        for (w = 0; w < k; w++)
+        {
+            if (!fmpz_is_zero(fmpz_mat_entry(c->con->C, u, w)))
+            {
+                for (v = 0; v < k; v++)
+                {
+                    if (!fmpz_is_zero(fmpz_mat_entry(c->T, w, v)))
+                    {
+                        slong curr, rest;
+                        rest = fmpz_get_si(fmpz_mat_entry(c->Q, w, v));
+                        curr = fmpz_get_si(fmpz_mat_entry(c->Q, u, v));
+                        fmpz_set_si(
+                                fmpz_mat_entry(c->Q, u, v),
+                                FLINT_MAX(curr, rest + 1));
+                    }
+                }
+            }
+        }
+    }
+}
+
+
+void
+connectivity_init_arb_mat(connectivity_t c, const arb_mat_t A)
 {
     slong i, j, dim;
     fmpz_mat_t B;
@@ -415,84 +563,14 @@ connectivity_init_arb_mat(connectivity_t c, fmpz_mat_t A)
     fmpz_mat_clear(B);
 }
 
-void
-connectivity_init(connectivity_t c, fmpz_mat_t A)
-{
-    slong i, j;
-    slong u, v, w;
-    slong n, k;
-
-    /* compute the condensation */
-    condensation_init(c->con, A);
-    n = c->con->n;
-    k = c->con->k;
-
-    /* check whether each scc contains a cycle */
-    _connectivity_init_scc_has_cycle(c, A);
-
-    /* compute the transitive closure of the condensation */
-    fmpz_mat_init(c->T, k, k);
-    _fmpz_mat_transitive_closure(c->C, A);
-
-    /*
-     * Is there a walk from u to v that passes through a cycle-containing scc?
-     * Cycles in the components u and v themselves are not considered.
-     * Remember that the condensation is a directed acyclic graph.
-     */
-    fmpz_mat_init(c->P, k, k);
-    fmpz_mat_zero(c->P);
-    for (w = 0; w < k; w++)
-    {
-        if (c->scc_has_cycle[w])
-        {
-            for (u = 0; u < k; u++)
-            {
-                for (v = 0; v < k; v++)
-                {
-                    if (!fmpz_is_zero(fmpz_mat_entry(c->T, u, v)))
-                    {
-                        fmpz_one(fmpz_mat_entry(c->P, u, v));
-                    }
-                }
-            }
-        }
-    }
-
-    /*
-     * What is the max length path from u to v in the condensation graph?
-     * If u==v or if v is unreachable from u then let this be zero.
-     * Remember that the condensation is a directed acyclic graph,
-     * and that the components are indexed in a post-order traversal.
-     */
-    fmpz_mat_init(c->Q, k, k);
-    fmpz_mat_zero(c->Q);
-    for (u = 0; u < k; u++)
-    {
-        for (v = 0; v < k; v++)
-        {
-            slong first;
-            first = fmpz_get_si(fmpz_mat_entry(c->con->C, u, v));
-            for (w = 0; w < k; w++)
-            {
-                slong curr, rest;
-                rest = fmpz_get_si(fmpz_mat_entry(c->Q, v, w));
-                curr = fmpz_get_si(fmpz_mat_entry(c->Q, u, w));
-                fmpz_set_si(
-                        fmpz_mat_entry(c->Q, v, w),
-                        FLINT_MAX(curr, first + rest));
-            }
-        }
-    }
-}
-
 
 int
 connectivity_has_truncation_error(connectivity_t c, slong i, slong j, ulong N)
 {
     /* mag_exp_tail is like sum_{k=N}^\infty x^k/k! */
     slong u, v;
-    u = c->partition[i];
-    v = c->partition[j];
+    u = c->con->partition[i];
+    v = c->con->partition[j];
 
     if (u == v)
     {
@@ -511,45 +589,11 @@ connectivity_has_truncation_error(connectivity_t c, slong i, slong j, ulong N)
     }
     else
     {
-        return fmpz_cmp_ui(fmpz_mat_entry(x->Q, u, v), N) > 0;
+        return fmpz_cmp_ui(fmpz_mat_entry(c->Q, u, v), N) > 0;
     }
 }
 
 
-/* Warshall's algorithm */
-void
-_fmpz_mat_transitive_closure(fmpz_mat_t B, fmpz_mat_t A)
-{
-    slong k, i, j, dim;
-    dim = fmpz_mat_nrows(A);
-
-    if (dim != fmpz_mat_ncols(A))
-    {
-        flint_printf("_fmpz_mat_transitive_closure: a square matrix is required!\n");
-        abort();
-    }
-
-    if (B != A)
-    {
-        fmpz_mat_set(B, A);
-    }
-
-    for (k = 0; k < dim; k++)
-    {
-        for (i = 0; i < dim; i++)
-        {
-            for (j = 0; j < dim; j++)
-            {
-                if (fmpz_is_zero(fmpz_mat_entry(B, i, j)) &&
-                    !fmpz_is_zero(fmpz_mat_entry(B, i, k)) &&
-                    !fmpz_is_zero(fmpz_mat_entry(B, k, j)))
-                {
-                    fmpz_one(fmpz_mat_entry(B, i, j));
-                }
-            }
-        }
-    }
-}
 
 int
 _arb_mat_is_diagonal(const arb_mat_t A)
@@ -784,13 +828,30 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
     }
     else
     {
+        fmpz_mat_t S;
+        int using_structure;
+
         connectivity_t C;
         int using_connectivity;
 
-        using_connectivity = _arb_mat_any_is_zero(A);
+        /* using_connectivity = _arb_mat_any_is_zero(A); */
+        using_connectivity = 0;
         if (using_connectivity)
         {
             connectivity_init_arb_mat(C, A);
+            flint_printf("using connectivity for expm:\n");
+            connectivity_fprint(stdout, C);
+        }
+        else
+        {
+            flint_printf("not using connectivity for expm\n");
+        }
+
+        using_structure = _arb_mat_any_is_zero(A);
+        if (using_structure)
+        {
+            fmpz_mat_init(S, dim, dim);
+            _arb_mat_exp_get_structure(S, A);
         }
 
         q = pow(wp, 0.25);  /* wanted magnitude */
@@ -823,6 +884,12 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
             for (i = 0; i < dim; i++)
                 for (j = 0; j < dim; j++)
                     arb_add_error_mag(arb_mat_entry(B, i, j), err);
+        }
+
+        if (using_structure)
+        {
+            _arb_mat_exp_set_structure(B, S);
+            fmpz_mat_clear(S);
         }
 
         for (i = 0; i < r; i++)
