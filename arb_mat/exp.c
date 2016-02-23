@@ -29,6 +29,54 @@
 
 #define LOG2_OVER_E 0.25499459743395350926
 
+int
+_arb_gt_si(arb_t a, slong b)
+{
+    int result;
+    arb_t c;
+    arb_init(c);
+    arb_set_si(c, b);
+    result = arb_gt(a, c);
+    arb_clear(c);
+    return result;
+}
+
+int
+_arb_lt_si(arb_t a, slong b)
+{
+    int result;
+    arb_t c;
+    arb_init(c);
+    arb_set_si(c, b);
+    result = arb_lt(a, c);
+    arb_clear(c);
+    return result;
+}
+
+void
+_arb_max_exact(arb_t z, const arb_t x, const arb_t y)
+{
+    if (!arb_is_exact(x)) abort();
+    if (!arb_is_exact(y)) abort();
+    if (arb_lt(x, y))
+    {
+        arb_set(z, y);
+    }
+    else
+    {
+        arb_set(z, x);
+    }
+}
+
+void
+_arb_mat_max_exact(arb_t x, arb_mat_t A)
+{
+    slong i, j;
+    arb_set(x, arb_mat_entry(A, 0, 0));
+    for (i = 0; i < arb_mat_nrows(A); i++)
+        for (j = 0; j < arb_mat_ncols(A); j++)
+            _arb_max_exact(x, x, arb_mat_entry(A, i, j));
+}
 
 /* Warshall's algorithm */
 void
@@ -892,21 +940,15 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
 
         N = _arb_mat_exp_choose_N(norm, wp);
 
+        /* if A is structurally nilpotent then set N to its degree */
         if (using_connectivity)
         {
-            arb_t n, nmax;
+            arb_t n;
             arb_init(n);
-            arb_init(nmax);
-            arb_set_si(n, N);
-            arb_zero(nmax);
-            for (i = 0; i < dim; i++)
-                for (j = 0; j < dim; j++)
-                    if (arb_gt(arb_mat_entry(C, i, j), nmax))
-                        arb_set(nmax, arb_mat_entry(C, i, j));
-            if (arb_lt(nmax, n))
-                N = arf_get_si(arb_midref(nmax), ARF_RND_UP);
+            _arb_mat_max_exact(n, C);
+            if (_arb_lt_si(n, N))
+                N = arf_get_si(arb_midref(n), ARF_RND_UP);
             arb_clear(n);
-            arb_clear(nmax);
         }
 
         mag_exp_tail(err, norm, N);
@@ -915,14 +957,10 @@ arb_mat_exp(arb_mat_t B, const arb_mat_t A, slong prec)
 
         if (using_connectivity)
         {
-            arb_t n;
-            arb_init(n);
-            arb_set_si(n, N);
             for (i = 0; i < dim; i++)
                 for (j = 0; j < dim; j++)
-                    if (arb_lt(n, arb_mat_entry(C, i, j)))
+                    if (_arb_gt_si(arb_mat_entry(C, i, j), N))
                         arb_add_error_mag(arb_mat_entry(B, i, j), err);
-            arb_clear(n);
             arb_mat_clear(C);
         }
         else
