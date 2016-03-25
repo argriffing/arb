@@ -303,6 +303,12 @@ int arb_mat_inv(arb_mat_t X, const arb_mat_t A, slong prec);
 
 void arb_mat_det(arb_t det, const arb_mat_t A, slong prec);
 
+int _arb_mat_gauss_seidel_inplace(arb_mat_t X, const arb_mat_t A,
+        const arb_mat_t B, slong prec);
+
+int arb_mat_gauss_seidel(arb_mat_t Z, const arb_mat_t A,
+        const arb_mat_t X, const arb_mat_t B, slong prec);
+
 int _arb_mat_cholesky_banachiewicz(arb_mat_t A, slong prec);
 
 int arb_mat_cho(arb_mat_t L, const arb_mat_t A, slong prec);
