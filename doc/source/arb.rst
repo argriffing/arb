@@ -1562,6 +1562,8 @@ Vector functions
 
 .. function:: void _arb_vec_scalar_addmul(arb_ptr res, arb_srcptr vec, slong len, const arb_t c, slong prec)
 
+.. function:: void _arb_vec_scalar_pow_ui(arb_ptr res, arb_srcptr vec, slong len, ulong e, slong prec)
+
    Performs the respective scalar operation elementwise.
 
 .. function:: void _arb_vec_dot(arb_t res, arb_srcptr vec1, arb_srcptr vec2, slong len2, slong prec)
